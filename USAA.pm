@@ -8,7 +8,7 @@ use Data::Dumper;
 use XML::LibXML;
 use strict;
 
-our $VERSION = '1.0';
+our $VERSION = '1.1';
 
 # USAA uses cookies:
 our $browser = LWP::UserAgent->new();

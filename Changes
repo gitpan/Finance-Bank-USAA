@@ -1,4 +1,8 @@
 Revision history for Perl extension Finance::Bank::USAA.
 
-1.00  Fri Apr 16 20:36:48 EDT 2004
+1.1   Sat Apr 17 14:04:55 EDT 2004
+	- removed reference to Finance::Bank::LloydsTSB, in test.pl
+
+
+1.0   Fri Apr 16 20:36:48 EDT 2004
 	- original version; copied template from Finance::Bank::LloydsTSB

@@ -7,7 +7,7 @@
 
 use Test;
 BEGIN { plan tests => 1 };
-use Finance::Bank::LloydsTSB;
+use Finance::Bank::USAA;
 ok(1); # If we made it this far, we're ok.
 
 #########################
