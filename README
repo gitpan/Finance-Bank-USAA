@@ -1,0 +1,33 @@
+NAME
+    Finance::Bank::USAA - Check your USAA accounts from Perl
+
+SYNOPSIS
+      use Finance::Bank::USAA;
+      for my $account (Finance::Bank::USAA->get_balances(
+          username  => $u,
+          password  => $p
+      )) {
+          printf "%20s -> %s\n", $account->name, $account->balance;
+      }
+
+DESCRIPTION
+    This module provides an interface to the USAA online banking system
+    at "http://www.usaa.com". Either "Crypt::SSLeay" or
+    "IO::Socket::SSL" must be installed, to support HTTPS working with
+    LWP. The methods this module provides are for retrieving
+    information, including "check_balances" and "get_balances", which
+    are synonymous. These methods return a list of account objects, each
+    of which can be queried for name and balance as shown above. The
+    method "display_balances" essentially executes the code shown in the
+    synopsis above.
+
+WARNING
+    Taken verbatim from Finance::Bank::LloydsTSB: This is code for
+    online banking, and that means your money, and that means BE
+    CAREFUL. You are encouraged, nay, expected, to audit the source of
+    this module yourself to reassure yourself that I am not doing
+    anything untoward with your banking data. This software is useful to
+    me, but is provided under NO GUARANTEE, explicit or implied.
+
+AUTHOR
+    Jeff Pace "jpace@cpan.org"
