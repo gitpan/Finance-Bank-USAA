@@ -8,14 +8,14 @@ use Data::Dumper;
 use XML::LibXML;
 use strict;
 
-our $VERSION = '1.1';
+our $VERSION = '1.2';
 
 # USAA uses cookies:
 our $browser = LWP::UserAgent->new();
 $browser->cookie_jar({});
 
 # enable to see what's going on:
-our $verbose = 0;
+our $verbose = 1;
 
 # unbuffer output:
 $|++;
@@ -104,7 +104,14 @@ sub fetch_data {
     # This nobr stuff fouls up the XML parser. We don't need it anyway.
     $accthtml =~ s-</?nobr>--g;
 
-    XML::LibXML->new->parse_html_string($accthtml);
+    # USAA is also using plain old ampersands in text fields, which are invalid.
+    $accthtml =~ s/\s&\s/ and /g;
+
+    logmsg "parsing HTML ...\n";
+    my $data = XML::LibXML->new->parse_html_string($accthtml);
+    logmsg "data parsed: $data";
+    
+    $data;
 }
 
 
