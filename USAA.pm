@@ -8,14 +8,14 @@ use Data::Dumper;
 use XML::LibXML;
 use strict;
 
-our $VERSION = '1.2';
+our $VERSION = '1.3';
 
 # USAA uses cookies:
 our $browser = LWP::UserAgent->new();
 $browser->cookie_jar({});
 
 # enable to see what's going on:
-our $verbose = 1;
+our $verbose = 0;
 
 # unbuffer output:
 $|++;
@@ -105,8 +105,8 @@ sub fetch_data {
     $accthtml =~ s-</?nobr>--g;
 
     # USAA is also using plain old ampersands in text fields, which are invalid.
-    $accthtml =~ s/\s&\s/ and /g;
-
+    $accthtml =~ s/(\s)&(\s)/$1&amp;$2/g;
+    
     logmsg "parsing HTML ...\n";
     my $data = XML::LibXML->new->parse_html_string($accthtml);
     logmsg "data parsed: $data";
@@ -273,7 +273,7 @@ Enables debugging output.
 These two methods are identical; C<check_balances> is provided for consistency
 with other similar Finance::Bank::* modules, such as Finance::Bank::LloydsTSB.
 
-Each method Returns an array of accounts in the format:
+Each method returns an array of accounts in the format:
 
 =over 4
 
