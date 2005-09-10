@@ -1,204 +1,351 @@
-#!/usr/bin/perl -w
-# -*- perl -*-
+#!/usr/bin/perl
 
 package Finance::Bank::USAA;
 
-use LWP;
-use Data::Dumper;
-use XML::LibXML;
 use strict;
+use base qw/Class::Accessor::Fast/;
+use WWW::Mechanize;
+use HTML::TokeParser::Simple;
+use HTML::TableExtract;
+use DateTime::Format::Strptime;
+use warnings;
 
-our $VERSION = '1.3';
+use Data::Dumper;
 
-# USAA uses cookies:
-our $browser = LWP::UserAgent->new();
-$browser->cookie_jar({});
+our $VERSION = '1.5';
 
-# enable to see what's going on:
+__PACKAGE__->mk_accessors('_mech');
+
+our $usaa_login = 'https://www.lc.usaa.com/inet/ent_logon/Logon';
+
 our $verbose = 0;
-
-# unbuffer output:
-$|++;
 
 sub logmsg {
     if ($verbose) {
         my @msg = @_;
         chomp @msg;
-        my ($pkg, $fname, $line, $sub) = caller(1);
-        printf STDERR "[%50s:%-5d] {%-50s} ", $fname, $line, $sub;
+        my ($pkg,  $fname, $line, undef) = caller(0);
+        my (undef, undef,  undef, $sub)  = caller(1);
+        printf STDERR "[%-50s:%-5d] {%-50s} ", $fname, $line, $sub;
         print STDERR @msg, "\n";
     }
 }
 
-sub dopost {
-    my $url      = shift;
-    my $postdata = shift || [];
-
-    logmsg "getting $url";
-
-    my $resp = $browser->post($url, $postdata);
-
-    logmsg "$resp successful? " . ($resp->is_success ? "yes" : "no") . "\n";
-    logmsg Dumper($resp);
-    logmsg "$resp successful ? " . $resp->is_success . "\n";
-    logmsg $resp->content . "\n";
-    
-    $resp->content;
-}
-
-
-sub fetch_data {
-    my ($class, %opts) = @_;
-
-    $verbose = $opts{verbose} if defined $opts{verbose};
-    
-    my $url        = 'https://www.lc.usaa.com/inet/lcs_corp/Logon';
-    my $username   = undef;
-    my $password   = undef;
-    my $configfile = glob($opts{configfile} || $ENV{HOME} . "/.usaarc");
-    
-    if (-f $configfile) {
-        logmsg "reading $configfile";
-        open F, $configfile or do { warn "could not open $configfile: $!"; };
-        while (<F>) {
-            chomp;
-            if (/^username:\s*(.*)/) {
-                $username = $1;
-            }
-            elsif (/^password:\s*(.*)/) {
-                $password = $1;
-            }
+sub stackmsg {
+    if ($verbose) {
+        my @msg = @_;
+        chomp @msg;
+        for my $lvl (0 .. 10) {
+            my ($pkg,  $fname, $line, undef) = caller($lvl);
+            my (undef, undef,  undef, $sub)  = caller($lvl + 1);
+            last unless $fname;
+            $sub ||= "";
+            printf STDERR "[%-50s:%-5d] {%-50s} ", $fname, $line, $sub;
+            print STDERR @msg, "\n";
+            @msg = ("\"");
         }
-        close F;
     }
-
-    $username = $opts{username} if defined $opts{username};
-    $password = $opts{password} if defined $opts{password};
-
-    unless (defined $username && defined $password) {
-        print STDERR "cannot login to USAA without username and password\n";
-        # this would be a good point to get the username and password, and 
-        # to store it in ~/.usaarc.
-        exit 1;
-    }
-
-    my @postdata = (
-                    "PS_RESPONSETIMESTAMP"                              => "1075395286897",
-                    "PS_TASKNAME"                                       => "",
-                    "PS_PAGEID"                                         => "logon",
-                    "PS_DYNAMIC_ACTION"                                 => "",
-                    "PS_ACTION_CONTEXT"                                 => "",
-                    "usaa_number"                                       => $username,
-                    "password"                                          => $password,
-                    "Submitted"                                         => "Yes",
-                    "PsButton_\x5Baction\x5Dsubmit\x5B\x2Faction\x5D.x" => "18",
-                    "PsButton_\x5Baction\x5Dsubmit\x5B\x2Faction\x5D.y" => "13",
-                   );
-
-    # log in
-    dopost($url, \@postdata);
-
-    # get account info
-    my $accthtml = dopost("https://www.gc.usaa.com/inet/ent_accounts/CpAccounts");
-
-    # This nobr stuff fouls up the XML parser. We don't need it anyway.
-    $accthtml =~ s-</?nobr>--g;
-
-    # USAA is also using plain old ampersands in text fields, which are invalid.
-    $accthtml =~ s/(\s)&(\s)/$1&amp;$2/g;
-    
-    logmsg "parsing HTML ...\n";
-    my $data = XML::LibXML->new->parse_html_string($accthtml);
-    logmsg "data parsed: $data";
-    
-    $data;
 }
 
-
-sub get_balances {
-    my ($class, %opts) = @_;
-
-    $verbose = $opts{verbose} if defined $opts{verbose};
+sub new {
+    my ($class, %args) = @_;
     
-    my $doc = $class->fetch_data(%opts);
-    # my $doc = $opts{file} ? XML::LibXML->new->parse_html_file('/tmp/usaa3.out') : $class->fetch_data(%opts);
+    my $self = { %args };
+    bless $self, $class;
     
-    logmsg Dumper($doc);
-
-    my @accounts = ();
+    $self->_mech(WWW::Mechanize->new(autocheck => 1,
+                                     onwarn => \&Carp::cluck,
+                                     onerror => \&Carp::confess));
     
-    # look for dollar signs in text:
-    my @results = $doc->findnodes('//td/text()[contains(., "$")]');
-    
-    for my $result (@results) {
-        logmsg "looking up $result\n";
-        logmsg "\$result->getValue(): " . $result->getValue();
-        $result->getValue() =~ /^\s*\$(.*?)\s*$/ms;
-        my $balance = $1;
-        $balance =~ s/\,//g;    # a hopeful "g"
-        logmsg "balance: $balance";
-
-        # up and over to the account name:
-        my $acct = $result->findvalue('ancestor::tr[1]/td[1]/input/@value');
-
-        unless ($acct) {
-            # insurance information is stored differently, compared to the
-            # location of the data:
-            logmsg "looking up insurance info ...";
-            $acct  = $result->findvalue('ancestor::table/preceding-sibling::table[1]/tr[1]/td[1]/span[1]/text()');
-        }
-
-        logmsg "storing $acct => $balance";
-        #$accounts{$acct} = $balance;
-
-        push @accounts, (bless {
-            balance    => $balance,
-            name       => $acct,
-            sort_code  => undef,
-            account_no => undef
-        }, "Finance::Bank::USAA::Account");
-    }
-
-    for (@accounts) {
-        logmsg "account: $_";
-    }
-
-    @accounts;
+    return $self;
 }
 
+# login to a USAA account
+sub login {
+    my $self = shift;
+    
+    $self->_mech->get($usaa_login);
+    $self->_mech->submit_form(form_name => 'Logon',
+                              fields => {
+                                         j_username => $self->{username},
+                                         j_password => $self->{password},
+                                        },
+                             );
+    
+    $self->{logged_in} = 1 if $self->_mech->success;
+}
 
+# support the same interface as other Bank::Finance::* modules:
 sub check_balance {
-    my ($class, %opts) = @_;
-    $class->get_balances(%opts);
+    my $class = shift;
+    my $self = $class->new(@_);
+    $self->accounts(transactions => 0);
 }
+
+# get all available accounts
+sub accounts {
+    my $self = shift;
+    my %opts = @_;
+
+    stackmsg "getting accounts";
+    
+    $self->login unless $self->{logged_in};
+    
+    my $accounts_html = $self->_mech->follow_link(text => "My Accounts")->content;
+    
+    my $p = HTML::TokeParser::Simple->new(string => $accounts_html);
+    
+    $self->{accounts} = [];
+    my $current_account = {};
+    
+    # XXX: Rewrite using TableExtract
+
+    my $is_insurance = 0;
+    
+    while (my $token = $p->get_token) {   
+        
+        # look for account names.
+        # USAA uses some browser detection and shows submit buttons to some
+        # browsers and Javascript links to others.  Mechanize seems to get the 
+        # nice submit buttons.
+        if ($token->is_start_tag('input')) {
+            if ($token->get_attr('name') =~ /ToBkAccounts/) {
+                $current_account->{name} = $token->get_attr('value');
+                $is_insurance = 0;
+            }
+        }
+        elsif ($token->is_start_tag('a')) {
+            if (defined($token->get_attr('href')) && $token->get_attr('href') =~ /PcAutoBillView/) {
+                $token = $p->get_token; # <nobr>
+                $token = $p->get_token; # text
+                $current_account->{name} = $token->as_is;
+                $is_insurance = 1;
+            }
+        }
+
+        # look for nobr tags, these surround the other data we need
+        my $isstart = $token->is_start_tag('nobr');
+
+        # Perl squawks about "Use of uninitialized value in string eq" here, and
+        # I don't know why, and nothing bad happens.
+
+        no warnings qw(uninitialized);
+        
+        if (defined $isstart && $isstart) {
+            $token = $p->get_token;
+            my $data = $token->as_is;
+
+            # USAA wraps negative numbers in parentheses and red text:
+            if ($token->is_start_tag('font') && $token->get_attr('color') eq '#ff0000') {
+                $token = $p->get_token;
+                $data = $token->as_is;
+            }
+            
+            if ($data =~ /^\d/) {
+                $current_account->{number} = $data;
+            }
+            elsif ($data =~ /^\(?\$/) {
+                $current_account->{balance} = $self->_parse_money($data);
+            }
+        }
+        elsif ($is_insurance && $token->is_start_tag('td') && $token->get_attr('class') eq "dataQuantity") {
+            $token = $p->get_token;
+            my $data = $token->as_is;
+
+            # insurance isn't numbered
+            $current_account->{number} = "n/a";
+            if ($data =~ /^\$/) {
+                $current_account->{balance} = $self->_parse_money($data);
+            }
+        }
+
+        # back to all warnings again.
+        use warnings;
+
+        if ($current_account->{name} && defined $current_account->{balance}) {
+            
+            # skip this if we're only looking for a certain account number
+            next if $opts{number} && $current_account->{number} ne $opts{number};
                  
+            my $transactions = {};
+            if ($opts{transactions}) {
+                $transactions = $self->transactions(account_name => $current_account->{name});
+            }
+                 
+            my $account = bless {
+                                 name        => $current_account->{name},
+                                 number      => $current_account->{number},
+                                 account_no  => $current_account->{number},
+                                 balance     => $current_account->{balance},
+                                 deposits    => $transactions->{deposits},
+                                 checks      => $transactions->{checks},
+                                 debits      => $transactions->{debits},
+                                 activity    => $transactions->{activity},
+                                }, "Finance::Bank::USAA::Account";
+            $current_account = {};
 
-sub display_balances {
-    my ($class, %opts) = @_;
+            return $account if $opts{number};
 
-    my @accounts = $class->get_balances(%opts);
-    my $format   = $opts{format} || "%20s -> %10s\n";
-
-    for my $acct (@accounts) {
-        printf $format, $acct->name, $acct->balance;
+            push @{ $self->{accounts} }, $account;
+        }
     }
+        
+    return wantarray ? @{ $self->{accounts} } : $self->{accounts};
 }
 
+# get a list of recent transactions
+sub transactions {
+    my $self = shift;
+    my %opts = @_;
+    
+    unless ($self->_mech->uri =~ /CpAccounts$/) {
+        # this is at the top on all accounts, including insurance.
+        $self->_mech->follow_link(text => "My Accounts");
+    }
 
-# straight from Finance::Bank::LloydsTSB
+    my $transactions = {};
+    
+    $self->_mech->form_name('cp_accounts');
+
+    # I really want mech->has_button("submit", value => $opts{account_name})
+    my $form = $self->_mech->{form}; # HTML::Form
+
+    my $transaction_html = undef;
+
+    my $i = 1;                  # one-indexed
+    while (my $input = $form->find_input(undef, 'submit', $i)) {
+        if ($opts{account_name} eq $input->value) {
+            $transaction_html = $self->_mech->click_button(value => $opts{account_name})->content;
+            last;
+        }
+        else {
+            ++$i;
+        }
+    }
+
+    unless (defined $transaction_html) {
+        # couldn't find the account as a submit button, so it must be insurance
+        $transaction_html = $self->_mech->follow_link(url_regex => qr/PcAutoBillView/)->content;
+    }
+
+    my %t_types = (
+                   # banking:
+                   deposits => "Recent Deposits",
+                   checks => "Recent Paid Checks",
+                   debits => "Recent ATM/Other Debits",
+                   # insurance:
+                   activity => "Recent Account Activity",
+                 );
+    
+    foreach my $type (keys %t_types) {
+        $transactions->{$type} = [];
+        
+        # TableExtract can't find out which table is which, so parse out the correct table first
+        my $type_name = $t_types{$type};
+
+        $transaction_html =~ /<h3>$type_name<\/h3>(.+?)<\/table>/ms;
+        my $content = $1;
+        next unless $content;
+        
+        my $html = $content . "</table>";
+        
+        my $te = HTML::TableExtract->new(decode => 0);
+        $te->parse($html);
+        foreach my $ts ($te->tables) {
+            foreach my $row ($ts->rows) {
+                # headers for Transactions and Insurance Info
+                next if $row->[0] eq "Transaction Date" || $row->[1] eq "Description";
+                
+                # strip whitespace and newlines
+                for (0 .. 1) {
+                    $row->[$_] =~ s/&nbsp;//g;
+                    $row->[$_] =~ s/^\s+//;
+                    $row->[$_] =~ s/\s+$//;
+                }
+                
+                # split the description into 2 fields
+                my ($desc1, $desc2) = split(/\r?\n\s*/, $row->[1]);
+
+                # pending debits (sometimes?) have the date mushed into the same
+                # cell as the description.
+
+                my $date = $self->_parse_date($row->[0]);
+                unless ($date) {
+                    # date parse failed in row 0 ... try what is in the description section:
+                    $date = $self->_parse_date($desc1);
+                    if ($date) {
+                        $desc1 = $desc2;
+                        $desc2 = "";
+                    }
+                }
+
+                my $trans = bless {
+                                   date => $date,
+                                   description => $desc1,
+                                   description2 => $desc2,
+                                   amount => $self->_parse_money($row->[2]),
+                                  }, "Finance::Bank::USAA::Transaction";
+                push @{ $transactions->{$type} }, $trans;
+            }
+        }
+    }
+
+    return $transactions;
+}
+
+# parse date strings into DateTime objects
+sub _parse_date {
+    my ($self, $date) = @_;
+    
+    my $dtf = DateTime::Format::Strptime->new(pattern => '%b %e, %Y');
+    my $parsed = $dtf->parse_datetime($date);
+    unless (defined $parsed) {
+        # try it again, with how USAA also formats dates (05/26/2003):
+        $dtf = DateTime::Format::Strptime->new(pattern => '%m/%d/%Y');
+        $parsed = $dtf->parse_datetime($date);
+    }
+    return $parsed;
+}
+
+# parse money string into a number
+sub _parse_money {
+    my ($self, $money) = @_;
+    
+    $money =~ /^\s*
+               (\()?            # parenthesized means negative
+               \$(.*?)          # the amount
+               \)?              # paren
+               \s*$/mxs;
+    my $negative = $1 || 0;
+    my $amount = $2;
+    $amount =~ s/\,//g;
+    return ($negative ? -1 : 1) * $amount;
+}
 
 package Finance::Bank::USAA::Account;
 
-# Basic OO smoke-and-mirrors Thingy
 no strict;
 
-sub AUTOLOAD { my $self=shift; $AUTOLOAD =~ s/.*:://; $self->{$AUTOLOAD} }
+sub AUTOLOAD { 
+    my $self = shift; 
+    $AUTOLOAD =~ s/.*:://;
+    
+    if (ref $self->{$AUTOLOAD} eq "ARRAY") {
+        return wantarray ? @{ $self->{$AUTOLOAD} } : $self->{$AUTOLOAD};
+    }
+    else {
+        return $self->{$AUTOLOAD};
+    }
+}
 
 sub new {
     my ($class, %opts) = @_;
     bless { %opts }, $class;
 }
 
+package Finance::Bank::USAA::Transaction;
+
+use base 'Finance::Bank::USAA::Account';
 
 1;
 
@@ -211,132 +358,78 @@ Finance::Bank::USAA - Check your USAA accounts from Perl
 =head1 SYNOPSIS
 
   use Finance::Bank::USAA;
-  for my $account (Finance::Bank::USAA->get_balances(
-      username  => $u,
-      password  => $p
-  )) {
+  for my $account (Finance::Bank::USAA->check_balances(username => "myname",
+                                                       password => "s3cr3t")) {
       printf "%20s -> %s\n", $account->name, $account->balance;
   }
 
-  # one liner:
-  perl -MFinance::Bank::USAA -e 
-    'Finance::Bank::USAA->display_balances(username => $u, password => $p)
-
 =head1 DESCRIPTION
 
-This module provides an interface to the USAA online banking system at
-C<http://www.usaa.com/>. Since this module uses LWP::Simple, you will need
-either C<Crypt::SSLeay> or C<IO::Socket::SSL> installed for HTTPS.
-
-=head2 Class Methods
-
-Each class method, except for C<dopost>, requires the username and password. 
-This may be provided one of three ways:
-
-    $HOME/.usaarc
-
-    configfile => /path/to/your/config/file
-
-    username => "1234567", password => "s3cr3t"
-
-See C<FILES> for more information.
-
-The following are in descending order of their "public-ness", i.e., how likely
-the user is to need to call them directly.
-
-=head3 Parameters
-
-=over 4
-
-=item username => STRING
-
-Defines the username.
-
-=item password => STRING
-
-Defines the password.
-
-=item verbose => NUM
-
-Enables debugging output.
-
-=back
+This module provides an interface to extracting account information from the
+USAA online banking system (C<http://www.usaa.com/>).
 
 =head3 Methods
 
 =over 4
 
-=item get_balances(... parameters ... )
+=item B<check_balance>(username => STRING, password => STRING)
 
-=item check_balance(... parameters ... )
-
-These two methods are identical; C<check_balances> is provided for consistency
-with other similar Finance::Bank::* modules, such as Finance::Bank::LloydsTSB.
-
-Each method returns an array of accounts in the format:
+This is a class method, returning an array of accounts in the format:
 
 =over 4
 
-=item balance
+=item B<balance>
 
 The current balance, as a floating-point number.
 
-=item name
+=item B<name>
 
 The account name.
 
-=item sort_code
+=item B<number>
+
+=item B<account_no>
+
+These two fields are identical, representing the account number. The
+"account_no" field included for consistency with other Finance::Bank::* modules.
+
+If not applicable, this will be "n/a".
+
+=item B<sort_code>
 
 Undefined. This is included for consistency with other Finance::Bank::* modules.
 
-=item account_no
-
-Undefined. This is included for consistency with other Finance::Bank::* modules.
-
 =back
 
-=item display_balances(... parameters ...)
+=item B<new>(username => STRING, password => STRING)
 
-Displays the accounts in the given format, or "%20s -> %10s\n" if none provided.
+Creates and returns an instance.
 
-=item fetch_data(... parameters ...)
+=item B<accounts>(transactions => NUMBER, number => STRING)
 
-Gets the account data from USAA, returning an XML document.
+An instance method returning an array (or reference to one) to account
+information. If the number parameter is defined, the returned information will
+be only for that account. If the transactions parameter is not zero,
+transactions will also be returned. for the given account.
 
-=item dopost($url, $postdata)
+=item B<transactions>(account_name => STRING)
 
-Sends the POST request to the given URL. C<postdata>, which is optional, is a
-reference to an array that is passed to the POST request. Returns the resulting
-content. No other parameters are used.
+An instance method returning an array (or reference to one) of the transactions
+for the account with the given name.
 
-=back
+Valid account names are: 
 
-=head2 Class Variables
+    deposits
+    checks
+    debits
+    activity (for insurance accounts only)
 
-=over 4
+The transaction fields are: 
 
-=item verbose
-
-Setting this to a non-zero value results in debugging output.
-
-=back
-
-=head1 FILES
-
-=over 4
-
-=item $HOME/.usaarc
-
-=item configfile => /path/to/your/config/file
-
-A file containing the username and password in the format:
-
-    username: 1234567
-    password: s3cr3t
-
-Note that this file should be readable by the user invoking this module; it
-B<should not> be readable by anyone else. A forthcoming version of this module
-may support encryption of said file.
+    date (as a DateTime object)
+    description (string)
+    description2 (string)
+    amount (number)
 
 =back
 
@@ -348,19 +441,17 @@ nay, expected, to audit the source of this module yourself to reassure yourself
 that I am not doing anything untoward with your banking data. This software is
 useful to me, but is provided under B<NO GUARANTEE>, explicit or implied.
 
-For security reasons, the command-line version is not recommended.
-
 This module uses the web interface at http://www.usaa.com, which is subject to
 change, so it is likely to go out of date. Please check CPAN
 (http://cpan.perl.org) for updates.
 
 =head1 AUTHOR
 
-Jeff Pace C<jpace@cpan.org>
+Jeff Pace C<jpace@cpan.org> and Andy Grundman C<andy@hybridized.org>
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright 2004 by Jeff Pace.
+Copyright 2005 by Jeff Pace.
 
 This library is free software; you may redistribute it and/or modify it under
 the same terms as Perl itself.
